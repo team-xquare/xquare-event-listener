@@ -4,17 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
-	"k8s.io/apimachinery/pkg/fields"
-	"os"
-	"time"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
+	"os"
+	"strconv"
+	"time"
 )
 
 func main() {
@@ -68,12 +67,58 @@ func main() {
 
 	stop := make(chan struct{})
 	go controller.Run(stop)
+
+	// Add a ticker to trigger the label update logic every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
 	for {
-		time.Sleep(time.Second)
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			updateLabels(clientset)
+		}
 	}
 }
 
-func increaseDeploymentReplica(clientset *kubernetes.Clientset, dynClient dynamic.Interface ,nodeName string) {
+func updateLabels(clientset *kubernetes.Clientset) {
+	deployments, err := clientset.AppsV1().Deployments(metav1.NamespaceAll).List(
+		context.TODO(), metav1.ListOptions{
+			LabelSelector: "tags.xquare.app/before-replicas",
+		},
+	)
+	if err != nil {
+		fmt.Printf("Error listing deployments: %v\n", err)
+		return
+	}
+
+	for _, deployment := range deployments.Items {
+		currentReplicaCountStr, ok := deployment.ObjectMeta.Labels["tags.xquare.app/before-replicas"]
+		if !ok {
+			fmt.Printf("Label tags.xquare.app/before-replicas not found for deployment %s\n", deployment.Name)
+			continue
+		}
+		currentReplicaCount, err := strconv.Atoi(currentReplicaCountStr)
+		if err != nil {
+			fmt.Printf("Error converting currentReplicaCountStr to int for deployment %s: %v\n", deployment.Name, err)
+			continue
+		}
+		int32ReplicaCount := int32(currentReplicaCount)
+		deployment.Spec.Replicas = &int32ReplicaCount
+		delete(deployment.ObjectMeta.Labels, "tags.xquare.app/before-replicas")
+		_, err = clientset.AppsV1().Deployments(deployment.Namespace).Update(
+			context.TODO(), &deployment, metav1.UpdateOptions{},
+		)
+		if err != nil {
+			fmt.Printf("Error updating replicas for deployment %s: %v\n", deployment.Name, err)
+			continue
+		}
+		fmt.Printf("Updated replicas for deployment %s to %d\n", deployment.Name, currentReplicaCount)
+	}
+}
+
+func increaseDeploymentReplica(clientset *kubernetes.Clientset, dynClient dynamic.Interface, nodeName string) {
 	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
 		FieldSelector: "spec.nodeName=" + nodeName,
 	})
@@ -84,46 +129,23 @@ func increaseDeploymentReplica(clientset *kubernetes.Clientset, dynClient dynami
 	for _, pod := range pods.Items {
 		appValue := pod.Labels["app"]
 		typeValue := pod.Labels["type"]
-		fmt.Printf("app:%s  type:%s\n",appValue, typeValue)
-		if appValue != "" && (typeValue == "test") {
-
+		fmt.Printf("app:%s  type:%s\n", appValue, typeValue)
+		if appValue != "" && ( typeValue == "test" || typeValue == "fe" || typeValue == "be" ){
 			deployments, err := clientset.AppsV1().Deployments(pod.Namespace).List(
 				context.TODO(), metav1.ListOptions{LabelSelector: fmt.Sprintf("app=%s", appValue)},
 			)
-
 			if err == nil && len(deployments.Items) > 0 {
 				deployment := deployments.Items[0]
+				currentReplicaCount := *deployment.Spec.Replicas
 				newReplicaCount := int32(2)
 				deployment.Spec.Replicas = &newReplicaCount
-
-				gvr := schema.GroupVersionResource{
-					Group:    "argoproj.io",
-					Version:  "v1alpha1",
-					Resource: "applications",
-				}
-
-				appList, err := dynClient.Resource(gvr).Namespace(pod.Namespace).List(context.Background(), metav1.ListOptions{})
-				if err == nil && len(appList.Items) > 0 {
-					app := &appList.Items[0]
-					annotations := app.GetAnnotations()
-					if annotations == nil {
-						annotations = make(map[string]string)
-					}
-					annotations["argocd.argoproj.io/sync-options"] = "IgnoreExtraneous"
-					app.SetAnnotations(annotations)
-
-					_, err = dynClient.Resource(gvr).Namespace(pod.Namespace).Update(context.Background(), app, metav1.UpdateOptions{})
-					if err != nil {
-						fmt.Printf("Error updating application: %v\n", err)
-						continue
-					}
-					_, err = clientset.AppsV1().Deployments(pod.Namespace).Update(
-						context.TODO(), &deployment, metav1.UpdateOptions{},
-					)
-					fmt.Printf("Increase deployment %s's replica %d to %d\n", appValue, 1, newReplicaCount)
-					if err != nil {
-						fmt.Printf(err.Error())
-					}
+				deployment.ObjectMeta.Labels["tags.xquare.app/before-replicas"] = fmt.Sprint(currentReplicaCount)
+				_, err = clientset.AppsV1().Deployments(pod.Namespace).Update(
+					context.TODO(), &deployment, metav1.UpdateOptions{},
+				)
+				fmt.Printf("Increase deployment %s's replica %d to %d\n", appValue, currentReplicaCount, newReplicaCount)
+				if err != nil {
+					fmt.Printf(err.Error())
 				}
 			}
 		}
