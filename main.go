@@ -52,16 +52,6 @@ func main() {
 					}
 				}
 			},
-			UpdateFunc: func(oldObj, newObj interface{}) {
-				event := newObj.(*corev1.Event)
-				if event.Reason == "DisruptionBlocked" {
-					involvedObject := event.InvolvedObject
-					fmt.Printf("Involved Object: %s/%s\n", involvedObject.Kind, involvedObject.Name)
-					if involvedObject.Kind == "Node" {
-						increaseDeploymentReplica(clientset, dynClient, involvedObject.Name)
-					}
-				}
-			},
 		},
 	)
 
