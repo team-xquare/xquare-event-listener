@@ -13,6 +13,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 )
 
 func main() {
@@ -30,6 +32,7 @@ func main() {
 	config.BearerToken = string(token)
 
 	clientset, err := kubernetes.NewForConfig(config)
+	dynClient, _ := dynamic.NewForConfig(config)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -46,7 +49,7 @@ func main() {
 					involvedObject := event.InvolvedObject
 					fmt.Printf("Involved Object: %s/%s\n", involvedObject.Kind, involvedObject.Name)
 					if involvedObject.Kind == "Node" {
-						increaseDeploymentReplica(clientset, involvedObject.Name)
+						increaseDeploymentReplica(clientset, dynClient, involvedObject.Name)
 					}
 				}
 			},
@@ -56,7 +59,7 @@ func main() {
 					involvedObject := event.InvolvedObject
 					fmt.Printf("Involved Object: %s/%s\n", involvedObject.Kind, involvedObject.Name)
 					if involvedObject.Kind == "Node" {
-						increaseDeploymentReplica(clientset, involvedObject.Name)
+						increaseDeploymentReplica(clientset, dynClient, involvedObject.Name)
 					}
 				}
 			},
@@ -70,7 +73,7 @@ func main() {
 	}
 }
 
-func increaseDeploymentReplica(clientset *kubernetes.Clientset, nodeName string) {
+func increaseDeploymentReplica(clientset *kubernetes.Clientset, dynClient dynamic.Interface ,nodeName string) {
 	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
 		FieldSelector: "spec.nodeName=" + nodeName,
 	})
@@ -93,12 +96,34 @@ func increaseDeploymentReplica(clientset *kubernetes.Clientset, nodeName string)
 				newReplicaCount := int32(2)
 				deployment.Spec.Replicas = &newReplicaCount
 
-				_, err := clientset.AppsV1().Deployments(pod.Namespace).Update(
-					context.TODO(), &deployment, metav1.UpdateOptions{},
-				)
-				fmt.Printf("Increase deployment %s's replica %d to %d\n", appValue, 1, newReplicaCount)
-				if err != nil {
-					fmt.Printf(err.Error())
+				gvr := schema.GroupVersionResource{
+					Group:    "argoproj.io",
+					Version:  "v1alpha1",
+					Resource: "applications",
+				}
+
+				appList, err := dynClient.Resource(gvr).Namespace(pod.Namespace).List(context.Background(), metav1.ListOptions{})
+				if err == nil && len(appList.Items) > 0 {
+					app := &appList.Items[0]
+					annotations := app.GetAnnotations()
+					if annotations == nil {
+						annotations = make(map[string]string)
+					}
+					annotations["argocd.argoproj.io/sync-options"] = "IgnoreExtraneous"
+					app.SetAnnotations(annotations)
+
+					_, err = dynClient.Resource(gvr).Namespace(pod.Namespace).Update(context.Background(), app, metav1.UpdateOptions{})
+					if err != nil {
+						fmt.Printf("Error updating application: %v\n", err)
+						continue
+					}
+					_, err = clientset.AppsV1().Deployments(pod.Namespace).Update(
+						context.TODO(), &deployment, metav1.UpdateOptions{},
+					)
+					fmt.Printf("Increase deployment %s's replica %d to %d\n", appValue, 1, newReplicaCount)
+					if err != nil {
+						fmt.Printf(err.Error())
+					}
 				}
 			}
 		}
