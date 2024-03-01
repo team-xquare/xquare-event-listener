@@ -85,7 +85,7 @@ func main() {
 func updateLabels(clientset *kubernetes.Clientset) {
 	deployments, err := clientset.AppsV1().Deployments(metav1.NamespaceAll).List(
 		context.TODO(), metav1.ListOptions{
-			LabelSelector: "tags.xquare.app/before-replicas",
+			LabelSelector: "tags.xquare.app/default-replicas",
 		},
 	)
 	if err != nil {
@@ -94,9 +94,9 @@ func updateLabels(clientset *kubernetes.Clientset) {
 	}
 
 	for _, deployment := range deployments.Items {
-		currentReplicaCountStr, ok := deployment.ObjectMeta.Labels["tags.xquare.app/before-replicas"]
+		currentReplicaCountStr, ok := deployment.ObjectMeta.Labels["tags.xquare.app/default-replicas"]
 		if !ok {
-			fmt.Printf("Label tags.xquare.app/before-replicas not found for deployment %s\n", deployment.Name)
+			fmt.Printf("Label tags.xquare.app/default-replicas not found for deployment %s\n", deployment.Name)
 			continue
 		}
 		currentReplicaCount, err := strconv.Atoi(currentReplicaCountStr)
@@ -106,7 +106,7 @@ func updateLabels(clientset *kubernetes.Clientset) {
 		}
 		int32ReplicaCount := int32(currentReplicaCount)
 		deployment.Spec.Replicas = &int32ReplicaCount
-		delete(deployment.ObjectMeta.Labels, "tags.xquare.app/before-replicas")
+		delete(deployment.ObjectMeta.Labels, "tags.xquare.app/default-replicas")
 		_, err = clientset.AppsV1().Deployments(deployment.Namespace).Update(
 			context.TODO(), &deployment, metav1.UpdateOptions{},
 		)
@@ -139,7 +139,7 @@ func increaseDeploymentReplica(clientset *kubernetes.Clientset, dynClient dynami
 				currentReplicaCount := *deployment.Spec.Replicas
 				newReplicaCount := int32(2)
 				deployment.Spec.Replicas = &newReplicaCount
-				deployment.ObjectMeta.Labels["tags.xquare.app/before-replicas"] = fmt.Sprint(currentReplicaCount)
+				deployment.ObjectMeta.Labels["tags.xquare.app/default-replicas"] = fmt.Sprint("1")
 				_, err = clientset.AppsV1().Deployments(pod.Namespace).Update(
 					context.TODO(), &deployment, metav1.UpdateOptions{},
 				)
